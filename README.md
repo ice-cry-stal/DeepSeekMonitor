@@ -18,6 +18,7 @@
 ## 最新设计思路
 
 这版界面的核心，不是“展示更多数据”，而是“让人更快看懂差异”。
+
 <img width="430" height="780" alt="image" src="https://github.com/user-attachments/assets/a100783d-4d5a-4778-accd-d9c36d3c4d1d" />
 
 
