@@ -18,10 +18,14 @@ struct DashboardView: View {
     let viewModel: ViewModel
     @State private var showSettings = false
 
+    @AppStorage("dashboardHeight") private var savedHeight: Double = 620
+    @State private var displayHeight: Double = 620
+    @State private var windowRef: NSWindow?
+
     private let pricing = Dictionary.deepseekPricing
 
     private let hitColor   = Color.green
-    private let missColor  = Color(red: 0.55, green: 0.85, blue: 0.55)
+    private let missColor  = Color(red: 0.4, green: 0.75, blue: 0.4)
     private let outputColor = Color.blue
 
     private let modelOrder: [String] = ["deepseek-v4-flash", "deepseek-v4-pro"]
@@ -64,11 +68,32 @@ struct DashboardView: View {
             toolbarRow
         }
         .glassBackground(blendingMode: .withinWindow)
-        .frame(width: 430, height: 620)
+        .frame(width: 430, height: max(400, min(1200, displayHeight)))
+        .transaction { transaction in
+            transaction.animation = nil
+        }
+        .background(WindowRefCapture(window: $windowRef))
+        .overlay(alignment: .bottom) {
+            ZStack(alignment: .center) {
+                BottomResizeHandle(
+                    height: $displayHeight,
+                    savedHeight: $savedHeight,
+                    window: windowRef
+                )
+                .frame(height: 10)
+
+                Capsule()
+                    .fill(.secondary.opacity(0.25))
+                    .frame(width: 36, height: 3)
+            }
+        }
         .overlay {
             if showSettings {
                 SettingsOverlay(viewModel: viewModel, isPresented: $showSettings)
             }
+        }
+        .onAppear {
+            displayHeight = savedHeight
         }
     }
 
@@ -82,7 +107,8 @@ struct DashboardView: View {
             divider
             headerItem(label: "今日",
                        amount: viewModel.todayCost.cnyDisplay,
-                       color: .orange)
+                       color: .orange,
+                       subtitle: "每日8:00更新")
             divider
             headerItem(label: "本月",
                        amount: viewModel.totalCost.cnyDisplay,
@@ -93,10 +119,13 @@ struct DashboardView: View {
         .glassCard()
     }
 
-    private func headerItem(label: String, amount: String, color: Color) -> some View {
+    private func headerItem(label: String, amount: String, color: Color, subtitle: String? = nil) -> some View {
         VStack(spacing: 2) {
             Text(label).font(.caption).foregroundColor(.secondary)
             Text(amount).font(.headline).fontWeight(.bold).foregroundColor(color)
+            if let subtitle {
+                Text(subtitle).font(.system(size: 8)).foregroundColor(.secondary.opacity(0.6))
+            }
         }
         .frame(maxWidth: .infinity)
     }
@@ -132,6 +161,10 @@ struct DashboardView: View {
             let c = viewModel.costBreakdown(model: model)
             let total = c.hit + c.miss + c.output
             let modelIdx = modelOrder.firstIndex(of: model.modelName) ?? 0
+            let avgCost = model.totalTokens > 0 ? total / Double(model.totalTokens) * 100_000_000 : 0
+            let avgCostLabel = model.totalTokens >= 30_000_000
+                ? String(format: "每亿Token平均花费\n%.2f元", avgCost)
+                : nil
             return BarRowData(
                 segments: [
                     (String(format: "¥%.2f", c.miss), c.miss, missColor),
@@ -139,7 +172,7 @@ struct DashboardView: View {
                     (String(format: "¥%.2f", c.output), c.output, outputColor),
                 ].filter { $0.value > 0 },
                 totalLabel: total.cnyDisplay,
-                extraLabel: nil,
+                extraLabel: avgCostLabel,
                 modelName: model.modelName,
                 displayName: pricing[model.modelName]?.displayName ?? model.modelName,
                 requestCount: model.totalRequests,
@@ -194,8 +227,9 @@ struct DashboardView: View {
                 Text("合计 \(totalLabel)").font(.caption).foregroundColor(.secondary)
             }
 
-            let allValues = rows.flatMap { $0.segments.map(\.value) }
-            let maxTotal = allValues.max() ?? 1
+            let maxRowTotal = rows.map { $0.segments.reduce(0) { $0 + $1.value } }.max() ?? 0
+            let maxFillRatio = title.hasPrefix("今日") ? 0.56 : 0.76
+            let maxTotal = maxRowTotal > 0 ? maxRowTotal / maxFillRatio : 1
 
             ForEach(rows.indices, id: \.self) { i in
                 barRow(data: rows[i], maxTotal: maxTotal)
@@ -221,20 +255,14 @@ struct DashboardView: View {
             .frame(width: 62, alignment: .leading)
 
             GeometryReader { geo in
-                let fullW = geo.size.width - 80
+                let fullW = geo.size.width
                 let ratio = maxTotal > 0 ? CGFloat(barTotal / maxTotal) : 0
-                let barW = min(max(fullW * ratio, 20), fullW)
+                let minReadableW = data.segments.count > 1 ? CGFloat(56) : CGFloat(34)
+                let barW = min(max(fullW * ratio, minReadableW), fullW)
 
-                VStack(spacing: 2) {
+                VStack(alignment: .leading, spacing: 2) {
                     if data.showAbove {
-                        HStack(spacing: 0) {
-                            ForEach(data.segments.indices, id: \.self) { j in
-                                let seg = data.segments[j]
-                                let segW = barTotal > 0 ? barW * CGFloat(seg.value / barTotal) : 0
-                                Text(seg.label).font(.system(size: 10)).foregroundColor(seg.color)
-                                    .lineLimit(1).frame(width: max(segW, 28), alignment: .center)
-                            }
-                        }
+                        segmentLabelRow(segments: data.segments, barTotal: barTotal, barW: barW, fullW: fullW)
                     } else {
                         Spacer().frame(height: 13)
                     }
@@ -249,16 +277,10 @@ struct DashboardView: View {
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .frame(width: fullW, alignment: .leading)
 
                     if !data.showAbove {
-                        HStack(spacing: 0) {
-                            ForEach(data.segments.indices, id: \.self) { j in
-                                let seg = data.segments[j]
-                                let segW = barTotal > 0 ? barW * CGFloat(seg.value / barTotal) : 0
-                                Text(seg.label).font(.system(size: 10)).foregroundColor(seg.color)
-                                    .lineLimit(1).frame(width: max(segW, 28), alignment: .center)
-                            }
-                        }
+                        segmentLabelRow(segments: data.segments, barTotal: barTotal, barW: barW, fullW: fullW)
                     } else {
                         Spacer().frame(height: 13)
                     }
@@ -270,11 +292,79 @@ struct DashboardView: View {
                 Text(data.totalLabel).font(.caption).fontWeight(.bold)
                 if let extra = data.extraLabel {
                     Text(extra).font(.system(size: 9)).foregroundColor(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.trailing)
                 }
             }
-            .frame(width: 66, alignment: .trailing)
+            .frame(width: 118, alignment: .trailing)
         }
         .frame(height: 50)
+    }
+
+    private func segmentLabelRow(
+        segments: [(label: String, value: Double, color: Color)],
+        barTotal: Double,
+        barW: CGFloat,
+        fullW: CGFloat
+    ) -> some View {
+        let labelW = CGFloat(46)
+        let gap = CGFloat(4)
+        let labelAreaW = min(fullW, max(barW, CGFloat(segments.count) * labelW + CGFloat(max(segments.count - 1, 0)) * gap))
+        let offsets = segmentLabelOffsets(
+            segments: segments,
+            barTotal: barTotal,
+            barW: barW,
+            labelAreaW: labelAreaW,
+            labelW: labelW,
+            gap: gap
+        )
+
+        return ZStack(alignment: .leading) {
+            ForEach(segments.indices, id: \.self) { j in
+                let seg = segments[j]
+
+                Text(seg.label)
+                    .font(.system(size: 10))
+                    .foregroundColor(seg.color)
+                    .lineLimit(1)
+                    .frame(width: labelW, alignment: .center)
+                    .offset(x: offsets[j])
+            }
+        }
+        .frame(width: labelAreaW, height: 13, alignment: .leading)
+    }
+
+    private func segmentLabelOffsets(
+        segments: [(label: String, value: Double, color: Color)],
+        barTotal: Double,
+        barW: CGFloat,
+        labelAreaW: CGFloat,
+        labelW: CGFloat,
+        gap: CGFloat
+    ) -> [CGFloat] {
+        guard !segments.isEmpty else { return [] }
+
+        let maxOffset = max(labelAreaW - labelW, 0)
+        var offsets = segments.indices.map { j in
+            let before = segments[..<j].reduce(0) { $0 + $1.value }
+            let center = barTotal > 0 ? barW * CGFloat((before + segments[j].value / 2) / barTotal) : 0
+            return min(max(center - labelW / 2, 0), maxOffset)
+        }
+
+        if offsets.count > 1 {
+            for i in 1..<offsets.count {
+                offsets[i] = max(offsets[i], offsets[i - 1] + labelW + gap)
+            }
+
+            if let last = offsets.indices.last, offsets[last] > maxOffset {
+                offsets[last] = maxOffset
+                for i in stride(from: last - 1, through: 0, by: -1) {
+                    offsets[i] = min(offsets[i], offsets[i + 1] - labelW - gap)
+                }
+            }
+        }
+
+        return offsets.map { min(max($0, 0), maxOffset) }
     }
 
     // MARK: - 辅助
@@ -347,5 +437,94 @@ struct DashboardView: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(.ultraThinMaterial)
+    }
+}
+
+// MARK: - 捕获 NSWindow 引用
+
+private struct WindowRefCapture: NSViewRepresentable {
+    @Binding var window: NSWindow?
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { window = v.window }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if window == nil { window = nsView.window }
+    }
+}
+
+private struct BottomResizeHandle: NSViewRepresentable {
+    @Binding var height: Double
+    @Binding var savedHeight: Double
+    let window: NSWindow?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(height: $height, savedHeight: $savedHeight)
+    }
+
+    func makeNSView(context: Context) -> HandleView {
+        let view = HandleView()
+        view.coordinator = context.coordinator
+        view.windowRef = window
+        return view
+    }
+
+    func updateNSView(_ nsView: HandleView, context: Context) {
+        nsView.windowRef = window
+        nsView.coordinator = context.coordinator
+    }
+
+    final class Coordinator {
+        let height: Binding<Double>
+        let savedHeight: Binding<Double>
+
+        init(height: Binding<Double>, savedHeight: Binding<Double>) {
+            self.height = height
+            self.savedHeight = savedHeight
+        }
+    }
+
+    final class HandleView: NSView {
+        weak var windowRef: NSWindow?
+        var coordinator: Coordinator?
+        private var startFrame: NSRect?
+        private var startMouseY: CGFloat = 0
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .resizeUpDown)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            startFrame = (windowRef ?? window)?.frame
+            startMouseY = NSEvent.mouseLocation.y
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let startFrame, let window = windowRef ?? window else { return }
+
+            let delta = startMouseY - NSEvent.mouseLocation.y
+            let newHeight = max(400, min(1200, Double(startFrame.height + delta)))
+            var frame = startFrame
+            frame.origin.y = startFrame.maxY - CGFloat(newHeight)
+            frame.size.height = CGFloat(newHeight)
+
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                window.setFrame(frame, display: true, animate: false)
+            }
+
+            coordinator?.height.wrappedValue = newHeight
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            if let height = coordinator?.height.wrappedValue {
+                coordinator?.savedHeight.wrappedValue = height
+            }
+            startFrame = nil
+        }
     }
 }
