@@ -228,7 +228,7 @@ struct DashboardView: View {
             }
 
             let maxRowTotal = rows.map { $0.segments.reduce(0) { $0 + $1.value } }.max() ?? 0
-            let maxFillRatio = title.hasPrefix("今日") ? 0.56 : 0.76
+            let maxFillRatio = title.hasPrefix("今日") ? 0.76 : 0.96
             let maxTotal = maxRowTotal > 0 ? maxRowTotal / maxFillRatio : 1
 
             ForEach(rows.indices, id: \.self) { i in
